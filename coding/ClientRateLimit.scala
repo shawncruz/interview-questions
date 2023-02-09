@@ -29,7 +29,7 @@ class TokenBucket(val maxTokens: Long, val timeframe: Long) extends RateLimiter 
     // Assumption here is that this class is only used in a single-threaded context
     var availableTokens: Long = maxTokens
     var lastRefresh: Long = System.currentTimeMillis()
-    val refreshRate: Long = maxTokens / timeframe
+    val refreshRate: Double = maxTokens.toDouble / timeframe.toDouble
 
     override def acceptsRequest(): Boolean = spendToken()
     
@@ -52,7 +52,7 @@ class TokenBucket(val maxTokens: Long, val timeframe: Long) extends RateLimiter 
     }
     private[this] def refillBucket(): Unit = {
         val now = System.currentTimeMillis()
-        val replenishedTokens = refreshRate * (now - lastRefresh)
+        val replenishedTokens = (refreshRate * (now - lastRefresh)).toLong
         availableTokens = math.min(maxTokens, availableTokens + replenishedTokens)
         lastRefresh = now
     }
@@ -62,16 +62,10 @@ val whitelistedClientIds = Set("client1", "client2", "client3")
 
 class Server(rateLimiter: RateLimiter) {
     val clientMap = whitelistedClientIds.map(id => id -> rateLimiter.copy()).toMap
-    def handleRequest(clientId: String): Unit = {
+    def handleRequest(clientId: String): Boolean = {
         clientMap.get(clientId) match {
-            case Some(clientRateLimiter: RateLimiter) => {
-                if (clientRateLimiter.acceptsRequest()) {
-                    println("Handling request")
-                } else {
-                    println("Rate limit reached; dropping request")
-                }
-            }
-            case None => println("Unrecognized client ID; ignoring request")    
+            case Some(clientRateLimiter: RateLimiter) => clientRateLimiter.acceptsRequest()
+            case None => false
         }
     }
 }
@@ -80,7 +74,19 @@ val server = Server(
     rateLimiter=TokenBucket(maxTokens=100, timeframe=60_000)
 )
 
-Range(1, 301).foreach(inc => {
-    println(s"Handling request number $inc")
-    server.handleRequest(whitelistedClientIds.head)
-})
+val assertRequestsDropWhenExpected = () => {
+    (1 to 100).foreach(_ => {
+            assert(server.handleRequest(whitelistedClientIds.head) == true)
+        }
+    )
+    assert(server.handleRequest(whitelistedClientIds.head) == false)
+    Thread.sleep(600) // This is the number of milliseconds it takes before a single token is regenerated (i.e. 1/refreshRate(token/ms) = 600ms/token)
+    assert(server.handleRequest(whitelistedClientIds.head) == true)
+}
+
+val assertUnexpectedClientDoesnHandleRequest = () => {
+    assert(server.handleRequest("unexpected-client-id") == false)
+}
+
+assertRequestsDropWhenExpected()
+assertUnexpectedClientDoesnHandleRequest()
